@@ -208,11 +208,9 @@ class RAVE(pl.LightningModule):
         if hasattr(torch, "compile"):
             try:
                 torch._dynamo.config.suppress_errors = False
-                self.encoder = torch.compile(self.encoder, mode="reduce-overhead")
-                self.decoder = torch.compile(self.decoder, mode="reduce-overhead")
-                self.discriminator = torch.compile(
-                    self.discriminator, mode="reduce-overhead"
-                )
+                self.encoder = torch.compile(self.encoder, mode="default")
+                self.decoder = torch.compile(self.decoder, mode="default")
+                self.discriminator = torch.compile(self.discriminator, mode="default")
                 print("torch.compile: encoder+decoder fused (mode=default)")
             except Exception as e:
                 print(f"torch.compile skipped: {e}")
@@ -325,8 +323,6 @@ class RAVE(pl.LightningModule):
 
     def training_step(self, batch, batch_idx):
         p = Profiler()
-        if hasattr(torch.compiler, "cudagraph_mark_step_begin"):
-            torch.compiler.cudagraph_mark_step_begin()
         gen_opt, dis_opt = self.optimizers()
         x_raw = batch
         x_raw.requires_grad = True
@@ -337,8 +333,6 @@ class RAVE(pl.LightningModule):
 
         # ENCODE INPUT
         # get multiband in case
-        if hasattr(torch.compiler, "cudagraph_mark_step_begin"):
-            torch.compiler.cudagraph_mark_step_begin()
         z, x_multiband = self.encode(x_raw, return_mb=True)
 
         z, reg = self.encoder.reparametrize(z)[:2]
@@ -346,8 +340,6 @@ class RAVE(pl.LightningModule):
         p.tick("encode")
 
         # DECODE LATENT
-        if hasattr(torch.compiler, "cudagraph_mark_step_begin"):
-            torch.compiler.cudagraph_mark_step_begin()
         y = self.decoder(z)
         if self.output_mode == "pqmf":
             y_multiband = y
@@ -392,8 +384,6 @@ class RAVE(pl.LightningModule):
         feature_matching_distance = 0.0
 
         if self.warmed_up:  # DISCRIMINATION
-            if hasattr(torch.compiler, "cudagraph_mark_step_begin"):
-                torch.compiler.cudagraph_mark_step_begin()
             xy = torch.cat([x_raw, y_raw], 0)
             features = self.discriminator(xy)
 
@@ -475,8 +465,6 @@ class RAVE(pl.LightningModule):
         p.tick("logging")
 
     def validation_step(self, x, batch_idx):
-        if hasattr(torch.compiler, "cudagraph_mark_step_begin"):
-            torch.compiler.cudagraph_mark_step_begin()
         z = self.encode(x)
         if isinstance(self.encoder, blocks.VariationalEncoder):
             mean = torch.split(z, z.shape[1] // 2, 1)[0]
@@ -496,8 +484,6 @@ class RAVE(pl.LightningModule):
 
     def validation_epoch_end(self, out):
         if not self.receptive_field.sum():
-            if hasattr(torch.compiler, "cudagraph_mark_step_begin"):
-                torch.compiler.cudagraph_mark_step_begin()
             print("Computing receptive field for this configuration...")
             lrf, rrf = rave.core.get_rave_receptive_field(
                 self, n_channels=self.n_channels
