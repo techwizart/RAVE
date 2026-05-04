@@ -245,6 +245,7 @@ def main(argv):
             name=RUN_NAME,
         ),
         accelerator=accelerator,
+        precision="bf16",
         devices=devices,
         callbacks=callbacks,
         max_epochs=300000,
