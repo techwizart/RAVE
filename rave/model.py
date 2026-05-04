@@ -209,6 +209,8 @@ class RAVE(pl.LightningModule):
                 print("torch.compile: encoder+decoder fused (mode=default)")
             except Exception as e:
                 print(f"torch.compile skipped: {e}")
+        self._encoder_orig = getattr(self.encoder, "_orig_mod", self.encoder)
+        self._decoder_orig = getattr(self.decoder, "_orig_mod", self.decoder)
 
         self.latent_size = latent_size
 
@@ -320,8 +322,8 @@ class RAVE(pl.LightningModule):
         x_raw.requires_grad = True
 
         batch_size = x_raw.shape[:-2]
-        self.encoder.set_warmed_up(self.warmed_up)
-        self.decoder.set_warmed_up(self.warmed_up)
+        self._encoder_orig.set_warmed_up(self.warmed_up)
+        self._decoder_orig.set_warmed_up(self.warmed_up)
 
         # ENCODE INPUT
         # get multiband in case
