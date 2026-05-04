@@ -117,7 +117,7 @@ class BetaWarmupCallback(pl.Callback):
         self.state.update(state_dict)
 
 
-@torch.fx.wrap
+@torch.compiler.disable
 def _pqmf_encode(pqmf, x: torch.Tensor):
     batch_size = x.shape[:-2]
     x_multiband = x.reshape(-1, 1, x.shape[-1])
@@ -126,7 +126,7 @@ def _pqmf_encode(pqmf, x: torch.Tensor):
     return x_multiband
 
 
-@torch.fx.wrap
+@torch.compiler.disable
 def _pqmf_decode(pqmf, x: torch.Tensor, batch_size: Iterable[int], n_channels: int):
     x = x.reshape(x.shape[0] * n_channels, -1, x.shape[-1])
     x = pqmf.inverse(x)
@@ -206,8 +206,8 @@ class RAVE(pl.LightningModule):
         if hasattr(torch, "compile"):
             try:
                 torch._dynamo.config.suppress_errors = False
-                self.encoder = torch.compile(self.encoder, mode="default")
-                self.decoder = torch.compile(self.decoder, mode="default")
+                self.encoder = torch.compile(self.encoder, mode="reduce-overhead")
+                self.decoder = torch.compile(self.decoder, mode="reduce-overhead")
                 print("torch.compile: encoder+decoder fused (mode=default)")
             except Exception as e:
                 print(f"torch.compile skipped: {e}")
@@ -332,6 +332,7 @@ class RAVE(pl.LightningModule):
         z, x_multiband = self.encode(x_raw, return_mb=True)
 
         z, reg = self.encoder.reparametrize(z)[:2]
+        z = z.clone()
         p.tick("encode")
 
         # DECODE LATENT
