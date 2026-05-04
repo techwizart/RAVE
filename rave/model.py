@@ -319,6 +319,8 @@ class RAVE(pl.LightningModule):
 
     def training_step(self, batch, batch_idx):
         p = Profiler()
+        if hasattr(torch.compiler, "cudagraph_mark_step_begin"):
+            torch.compiler.cudagraph_mark_step_begin()
         gen_opt, dis_opt = self.optimizers()
         x_raw = batch
         x_raw.requires_grad = True
@@ -461,6 +463,8 @@ class RAVE(pl.LightningModule):
         p.tick("logging")
 
     def validation_step(self, x, batch_idx):
+        if hasattr(torch.compiler, "cudagraph_mark_step_begin"):
+            torch.compiler.cudagraph_mark_step_begin()
         z = self.encode(x)
         if isinstance(self.encoder, blocks.VariationalEncoder):
             mean = torch.split(z, z.shape[1] // 2, 1)[0]
@@ -480,6 +484,8 @@ class RAVE(pl.LightningModule):
 
     def validation_epoch_end(self, out):
         if not self.receptive_field.sum():
+            if hasattr(torch.compiler, "cudagraph_mark_step_begin"):
+                torch.compiler.cudagraph_mark_step_begin()
             print("Computing receptive field for this configuration...")
             lrf, rrf = rave.core.get_rave_receptive_field(
                 self, n_channels=self.n_channels
