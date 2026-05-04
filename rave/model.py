@@ -337,6 +337,8 @@ class RAVE(pl.LightningModule):
 
         # ENCODE INPUT
         # get multiband in case
+        if hasattr(torch.compiler, "cudagraph_mark_step_begin"):
+            torch.compiler.cudagraph_mark_step_begin()
         z, x_multiband = self.encode(x_raw, return_mb=True)
 
         z, reg = self.encoder.reparametrize(z)[:2]
@@ -344,6 +346,8 @@ class RAVE(pl.LightningModule):
         p.tick("encode")
 
         # DECODE LATENT
+        if hasattr(torch.compiler, "cudagraph_mark_step_begin"):
+            torch.compiler.cudagraph_mark_step_begin()
         y = self.decoder(z)
         if self.output_mode == "pqmf":
             y_multiband = y
