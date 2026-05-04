@@ -201,16 +201,18 @@ class RAVE(pl.LightningModule):
         self.register_buffer("latent_pca", torch.eye(latent_size))
         self.register_buffer("latent_mean", torch.zeros(latent_size))
         self.register_buffer("fidelity", torch.zeros(latent_size))
+        _enc_ref = self.encoder
+        _dec_ref = self.decoder
         if hasattr(torch, "compile"):
             try:
-                torch._dynamo.config.suppress_errors = True
+                torch._dynamo.config.suppress_errors = False
                 self.encoder = torch.compile(self.encoder, mode="default")
                 self.decoder = torch.compile(self.decoder, mode="default")
                 print("torch.compile: encoder+decoder fused (mode=default)")
             except Exception as e:
                 print(f"torch.compile skipped: {e}")
-        self._encoder_orig = getattr(self.encoder, "_orig_mod", self.encoder)
-        self._decoder_orig = getattr(self.decoder, "_orig_mod", self.decoder)
+        object.__setattr__(self, "_encoder_orig", _enc_ref)
+        object.__setattr__(self, "_decoder_orig", _dec_ref)
 
         self.latent_size = latent_size
 
