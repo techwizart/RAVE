@@ -117,7 +117,7 @@ class BetaWarmupCallback(pl.Callback):
         self.state.update(state_dict)
 
 
-@torch.compiler.disable
+@torch.fx.wrap
 def _pqmf_encode(pqmf, x: torch.Tensor):
     batch_size = x.shape[:-2]
     x_multiband = x.reshape(-1, 1, x.shape[-1])
@@ -126,7 +126,7 @@ def _pqmf_encode(pqmf, x: torch.Tensor):
     return x_multiband
 
 
-@torch.compiler.disable
+@torch.fx.wrap
 def _pqmf_decode(pqmf, x: torch.Tensor, batch_size: Iterable[int], n_channels: int):
     x = x.reshape(x.shape[0] * n_channels, -1, x.shape[-1])
     x = pqmf.inverse(x)
@@ -203,16 +203,22 @@ class RAVE(pl.LightningModule):
         self.register_buffer("fidelity", torch.zeros(latent_size))
         _enc_ref = self.encoder
         _dec_ref = self.decoder
+        _dis_ref = self.discriminator
+
         if hasattr(torch, "compile"):
             try:
                 torch._dynamo.config.suppress_errors = False
                 self.encoder = torch.compile(self.encoder, mode="reduce-overhead")
                 self.decoder = torch.compile(self.decoder, mode="reduce-overhead")
+                self.discriminator = torch.compile(
+                    self.discriminator, mode="reduce-overhead"
+                )
                 print("torch.compile: encoder+decoder fused (mode=default)")
             except Exception as e:
                 print(f"torch.compile skipped: {e}")
         object.__setattr__(self, "_encoder_orig", _enc_ref)
         object.__setattr__(self, "_decoder_orig", _dec_ref)
+        object.__setattr__(self, "_discriminator_orig", _dis_ref)
 
         self.latent_size = latent_size
 
@@ -382,6 +388,8 @@ class RAVE(pl.LightningModule):
         feature_matching_distance = 0.0
 
         if self.warmed_up:  # DISCRIMINATION
+            if hasattr(torch.compiler, "cudagraph_mark_step_begin"):
+                torch.compiler.cudagraph_mark_step_begin()
             xy = torch.cat([x_raw, y_raw], 0)
             features = self.discriminator(xy)
 
