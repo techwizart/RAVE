@@ -332,6 +332,8 @@ class RAVE(pl.LightningModule):
         return feature_real, feature_fake
 
     def training_step(self, batch, batch_idx):
+        if hasattr(torch.compiler, "cudagraph_mark_step_begin"):
+            torch.compiler.cudagraph_mark_step_begin()
         p = Profiler()
         gen_opt, dis_opt = self.optimizers()
         x_raw = batch
@@ -467,6 +469,10 @@ class RAVE(pl.LightningModule):
         p.tick("logging")
 
     def validation_step(self, x, batch_idx):
+        # 1. Reset the CUDA Graph memory allocator for this step
+        if hasattr(torch.compiler, "cudagraph_mark_step_begin"):
+            torch.compiler.cudagraph_mark_step_begin()
+
         z = self.encode(x)
         if isinstance(self.encoder, blocks.VariationalEncoder):
             mean = torch.split(z, z.shape[1] // 2, 1)[0]
@@ -482,7 +488,12 @@ class RAVE(pl.LightningModule):
         if self.trainer is not None:
             self.log("validation", full_distance)
 
-        return torch.cat([x, y], -1), mean
+        # 2. CRITICAL: Clone outputs so they escape the static CUDA graph memory pool!
+        # If you do not clone here, the next batch will overwrite this memory.
+        out_tensor = torch.cat([x, y], -1).detach().clone()
+        out_mean = mean.detach().clone() if mean is not None else None
+
+        return out_tensor, out_mean
 
     def validation_epoch_end(self, out):
         if not self.receptive_field.sum():
@@ -550,3 +561,4 @@ class RAVE(pl.LightningModule):
         model = ["```"] + model + ["```"]
         model = "\n".join(model)
         tb.add_text("model", model)
+
