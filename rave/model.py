@@ -6,6 +6,7 @@ import gin, pdb
 import numpy as np
 import pytorch_lightning as pl
 import torch
+import torch._dynamo
 import torch.nn as nn
 from einops import rearrange
 from sklearn.decomposition import PCA
@@ -202,8 +203,6 @@ class RAVE(pl.LightningModule):
         self.register_buffer("fidelity", torch.zeros(latent_size))
         if hasattr(torch, "compile"):
             try:
-                import torch._dynamo
-
                 torch._dynamo.config.suppress_errors = True
                 self.encoder = torch.compile(self.encoder, mode="default")
                 self.decoder = torch.compile(self.decoder, mode="default")
