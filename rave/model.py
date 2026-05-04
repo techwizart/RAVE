@@ -12,11 +12,13 @@ from einops import rearrange
 from sklearn.decomposition import PCA
 from pytorch_lightning.trainer.states import RunningStage
 
-
 import rave.core
-
 from . import blocks
 
+# --- B200 / BLACKWELL HARDWARE OPTIMIZATIONS ---
+torch.backends.cudnn.benchmark = True
+torch.set_float32_matmul_precision("high")  # Enables 5th-Gen Tensor Cores for TF32
+# -----------------------------------------------
 
 _default_loss_weights = {
     "audio_distance": 1.0,
@@ -117,7 +119,7 @@ class BetaWarmupCallback(pl.Callback):
         self.state.update(state_dict)
 
 
-@torch.fx.wrap
+# REMOVED @torch.fx.wrap to allow Dynamo to trace into PQMF and fuse the graph
 def _pqmf_encode(pqmf, x: torch.Tensor):
     batch_size = x.shape[:-2]
     x_multiband = x.reshape(-1, 1, x.shape[-1])
@@ -126,7 +128,7 @@ def _pqmf_encode(pqmf, x: torch.Tensor):
     return x_multiband
 
 
-@torch.fx.wrap
+# REMOVED @torch.fx.wrap
 def _pqmf_decode(pqmf, x: torch.Tensor, batch_size: Iterable[int], n_channels: int):
     x = x.reshape(x.shape[0] * n_channels, -1, x.shape[-1])
     x = pqmf.inverse(x)
@@ -161,7 +163,6 @@ class RAVE(pl.LightningModule):
         input_mode: str = "pqmf",
         output_mode: str = "pqmf",
         audio_monitor_epochs: int = 1,
-        # for retro-compatibility
         enable_pqmf_encode: Optional[bool] = None,
         enable_pqmf_decode: Optional[bool] = None,
         is_mel_input: Optional[bool] = None,
@@ -176,7 +177,7 @@ class RAVE(pl.LightningModule):
         assert output_mode in ["raw", "pqmf"]
         self.input_mode = input_mode
         self.output_mode = output_mode
-        # retro-compatibility
+
         if (enable_pqmf_encode is not None) or (enable_pqmf_decode is not None):
             self.input_mode = "pqmf" if enable_pqmf_encode else "raw"
             self.output_mode = "pqmf" if enable_pqmf_decode else "raw"
@@ -188,7 +189,6 @@ class RAVE(pl.LightningModule):
             "RAVE model requires either weights or loss_weights (depreciated) keyword"
         )
 
-        # setup model
         self.encoder = encoder(n_channels=n_channels)
         self.decoder = decoder(n_channels=n_channels)
         self.discriminator = discriminator(n_channels=n_channels)
@@ -201,35 +201,45 @@ class RAVE(pl.LightningModule):
         self.register_buffer("latent_pca", torch.eye(latent_size))
         self.register_buffer("latent_mean", torch.zeros(latent_size))
         self.register_buffer("fidelity", torch.zeros(latent_size))
+
         _enc_ref = self.encoder
         _dec_ref = self.decoder
         _dis_ref = self.discriminator
 
         if hasattr(torch, "compile"):
             try:
-                torch._dynamo.config.suppress_errors = False
-                self.encoder = torch.compile(self.encoder, mode="default")
-                self.decoder = torch.compile(self.decoder, mode="default")
-                self.discriminator = torch.compile(self.discriminator, mode="default")
-                print("torch.compile: encoder+decoder fused (mode=default)")
+                # Force strictly static graphs to bypass cached_conv shape breaks
+                torch._dynamo.config.suppress_errors = True
+                torch._dynamo.config.cache_size_limit = 64
+
+                self.encoder = torch.compile(
+                    self.encoder, mode="reduce-overhead", dynamic=False
+                )
+                self.decoder = torch.compile(
+                    self.decoder, mode="reduce-overhead", dynamic=False
+                )
+                self.discriminator = torch.compile(
+                    self.discriminator, mode="reduce-overhead", dynamic=False
+                )
+                print(
+                    "torch.compile: encoder+decoder+discriminator fused (mode=reduce-overhead)"
+                )
             except Exception as e:
                 print(f"torch.compile skipped: {e}")
+
         object.__setattr__(self, "_encoder_orig", _enc_ref)
         object.__setattr__(self, "_decoder_orig", _dec_ref)
         object.__setattr__(self, "_discriminator_orig", _dis_ref)
 
         self.latent_size = latent_size
-
         self.automatic_optimization = False
 
-        # SCHEDULE
         self.warmup = phase_1_duration
         self.warmup_quantize = warmup_quantize
         self.weights = _default_loss_weights
         self.weights.update(weights)
         self.warmed_up = False
 
-        # CONSTANTS
         self.sr = sampling_rate
         self.valid_signal_crop = valid_signal_crop
         self.n_channels = n_channels
@@ -331,15 +341,12 @@ class RAVE(pl.LightningModule):
         self._encoder_orig.set_warmed_up(self.warmed_up)
         self._decoder_orig.set_warmed_up(self.warmed_up)
 
-        # ENCODE INPUT
-        # get multiband in case
         z, x_multiband = self.encode(x_raw, return_mb=True)
 
         z, reg = self.encoder.reparametrize(z)[:2]
         z = z.clone()
         p.tick("encode")
 
-        # DECODE LATENT
         y = self.decoder(z)
         if self.output_mode == "pqmf":
             y_multiband = y
@@ -350,8 +357,6 @@ class RAVE(pl.LightningModule):
             y_raw = y
             y_multiband = _pqmf_encode(self.pqmf, y)
 
-        # TODO this has been added for training with num_samples = 65536 samples, output padding seems to mess with output dimensions.
-        # this may probably conflict with cached_conv
         y_raw = y_raw[..., : x_raw.shape[-1]]
         y_multiband = y_multiband[..., : x_multiband.shape[-1]]
 
@@ -368,7 +373,6 @@ class RAVE(pl.LightningModule):
             )
         p.tick("crop")
 
-        # DISTANCE BETWEEN INPUT AND OUTPUT
         distances = {}
         multiband_distance = self.multiband_audio_distance(x_multiband, y_multiband)
         p.tick("mb distance")
@@ -383,7 +387,7 @@ class RAVE(pl.LightningModule):
 
         feature_matching_distance = 0.0
 
-        if self.warmed_up:  # DISCRIMINATION
+        if self.warmed_up:
             xy = torch.cat([x_raw, y_raw], 0)
             features = self.discriminator(xy)
 
@@ -425,7 +429,6 @@ class RAVE(pl.LightningModule):
             loss_adv = torch.tensor(0.0).to(x_raw)
         p.tick("discrimination")
 
-        # COMPOSE GEN LOSS
         loss_gen = {}
         loss_gen.update(distances)
         p.tick("update loss gen dict")
@@ -439,10 +442,10 @@ class RAVE(pl.LightningModule):
             )
             loss_gen["adversarial"] = self.weights["adversarial"] * loss_adv
 
-        # OPTIMIZATION
+        # UPDATED OPTIMIZATION to use manual_backward for AMP scaling safety
         if not (batch_idx % self.update_discriminator_every) and self.warmed_up:
             dis_opt.zero_grad()
-            loss_dis.backward()
+            self.manual_backward(loss_dis)
             dis_opt.step()
             p.tick("dis opt")
         else:
@@ -450,10 +453,9 @@ class RAVE(pl.LightningModule):
             loss_gen_value = 0.0
             for k, v in loss_gen.items():
                 loss_gen_value += v * self.weights.get(k, 1.0)
-            loss_gen_value.backward()
+            self.manual_backward(loss_gen_value)
             gen_opt.step()
 
-        # LOGGING
         self.log("beta_factor", self.beta_factor)
 
         if self.warmed_up:
@@ -503,7 +505,6 @@ class RAVE(pl.LightningModule):
         if self.trainer.state.stage == RunningStage.SANITY_CHECKING:
             return
 
-        # LATENT SPACE ANALYSIS
         if not self.warmed_up and isinstance(self.encoder, blocks.VariationalEncoder):
             z = torch.cat(z, 0)
             z = rearrange(z, "b c t -> (b t) c")
