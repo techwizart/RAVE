@@ -117,6 +117,8 @@ def parse_augmentations(augmentations):
 
 def main(argv):
     torch.set_float32_matmul_precision("high")
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
     torch.backends.cudnn.benchmark = True
 
     # check dataset channels
@@ -250,6 +252,7 @@ def main(argv):
         max_steps=FLAGS.max_steps,
         profiler="simple",
         enable_progress_bar=FLAGS.progress,
+        precision="bf16",
         **val_check,
     )
 
